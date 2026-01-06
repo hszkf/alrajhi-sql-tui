@@ -1,0 +1,21 @@
+# Build artifacts
+/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local config
+.env
+*.local
+.claude/
+
+# Export files
+export_*.csv
+export_*.json

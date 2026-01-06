@@ -1,0 +1,969 @@
+//! UI widgets for the application
+
+use crate::app::{App, SchemaNodeType, ResultsTab};
+use crate::db::CellValue;
+use crate::ui::AlrajhiTheme;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, Scrollbar, ScrollbarOrientation, ScrollbarState, Cell};
+use ratatui::layout::Margin;
+
+/// Line number gutter width (4 chars + 1 separator)
+const LINE_NUMBER_WIDTH: u16 = 5;
+
+/// Draw the query editor panel with line numbers and scrolling
+pub fn draw_query_editor(f: &mut Frame, app: &mut App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    let title = if active { " Query [1] ▪ " } else { " Query [1] " };
+
+    // Create outer block
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(title, AlrajhiTheme::title()));
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split inner area: line numbers | code
+    if inner_area.width > LINE_NUMBER_WIDTH + 2 {
+        let line_num_area = Rect {
+            x: inner_area.x,
+            y: inner_area.y,
+            width: LINE_NUMBER_WIDTH,
+            height: inner_area.height,
+        };
+
+        let code_area = Rect {
+            x: inner_area.x + LINE_NUMBER_WIDTH,
+            y: inner_area.y,
+            width: inner_area.width - LINE_NUMBER_WIDTH,
+            height: inner_area.height,
+        };
+
+        // Update scroll position to keep cursor visible
+        let visible_width = code_area.width as usize;
+        let visible_height = code_area.height as usize;
+        app.update_scroll(visible_width, visible_height);
+
+        // Get lines from query
+        let query_lines: Vec<&str> = if app.query.is_empty() {
+            vec![""]
+        } else {
+            app.query.split('\n').collect()
+        };
+
+        // Draw line numbers (with vertical scroll)
+        let line_numbers: Vec<Line> = query_lines
+            .iter()
+            .enumerate()
+            .skip(app.query_scroll_y)
+            .take(visible_height)
+            .map(|(n, _)| {
+                Line::from(Span::styled(
+                    format!("{:>3} │", n + 1),
+                    Style::default().fg(AlrajhiTheme::COMMENT),
+                ))
+            })
+            .collect();
+
+        let line_num_widget = Paragraph::new(line_numbers);
+        f.render_widget(line_num_widget, line_num_area);
+
+        // Draw syntax-highlighted code with scrolling
+        let highlighted_lines = highlight_sql_with_scroll(
+            &app.query,
+            app.query_scroll_x,
+            app.query_scroll_y,
+            visible_width,
+            visible_height,
+        );
+        let code_widget = Paragraph::new(highlighted_lines);
+        f.render_widget(code_widget, code_area);
+
+        // Show cursor when query editor is active
+        if active {
+            let (cursor_x, cursor_y) = calculate_cursor_position_with_scroll(
+                app,
+                code_area,
+            );
+            f.set_cursor(cursor_x, cursor_y);
+        }
+    }
+}
+
+/// Draw the results table panel with tabs
+pub fn draw_results_table(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    // Draw tabs header
+    let tabs_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 2,
+    };
+
+    let content_area = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    };
+
+    // Draw tab bar
+    draw_results_tabs(f, app, tabs_area, active);
+
+    if app.result.columns.is_empty() {
+        let help_text = vec![
+            Line::from(""),
+            Line::from(Span::styled("No results yet", AlrajhiTheme::dim_text())),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Type a query and press ", AlrajhiTheme::dim_text()),
+                Span::styled("Enter", AlrajhiTheme::info()),
+                Span::styled(" to execute", AlrajhiTheme::dim_text()),
+            ]),
+        ];
+        let empty_msg = Paragraph::new(help_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            )
+            .alignment(Alignment::Center);
+        f.render_widget(empty_msg, content_area);
+        return;
+    }
+
+    // Draw content based on selected tab
+    match app.results_tab {
+        ResultsTab::Data => draw_results_data(f, app, content_area, active),
+        ResultsTab::Columns => draw_results_columns(f, app, content_area, active),
+        ResultsTab::Stats => draw_results_stats(f, app, content_area, active),
+    }
+}
+
+/// Draw the tabs bar
+fn draw_results_tabs(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let tabs = vec![
+        ("1:Data", ResultsTab::Data),
+        ("2:Columns", ResultsTab::Columns),
+        ("3:Stats", ResultsTab::Stats),
+    ];
+
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    for (label, tab) in tabs {
+        let style = if app.results_tab == tab {
+            Style::default()
+                .fg(AlrajhiTheme::TEXT)
+                .bg(AlrajhiTheme::PRIMARY)
+                .add_modifier(Modifier::BOLD)
+        } else if active {
+            Style::default().fg(AlrajhiTheme::TEXT_DIM)
+        } else {
+            Style::default().fg(AlrajhiTheme::TEXT_MUTED)
+        };
+        spans.push(Span::styled(format!(" {} ", label), style));
+        spans.push(Span::raw(" "));
+    }
+
+    // Add row/col info on the right
+    if !app.result.columns.is_empty() {
+        let info = format!(
+            "│ {} rows × {} cols ",
+            app.result.row_count,
+            app.result.columns.len()
+        );
+        spans.push(Span::styled(info, AlrajhiTheme::dim_text()));
+    }
+
+    let tabs_line = Line::from(spans);
+    let tabs_widget = Paragraph::new(tabs_line)
+        .style(Style::default().bg(AlrajhiTheme::BG_PANEL));
+    f.render_widget(tabs_widget, area);
+}
+
+/// Draw the data tab (table rows)
+fn draw_results_data(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    // Build title with stats
+    let exec_time_ms = app.result.execution_time.as_secs_f64() * 1000.0;
+    let title = format!(
+        " Data │ {} rows │ {} cols │ {:.1}ms ",
+        app.result.row_count,
+        app.result.columns.len(),
+        exec_time_ms
+    );
+
+    // Calculate available width for columns
+    let available_width = area.width.saturating_sub(2) as usize; // minus borders
+    let row_num_width = (app.result.rows.len().to_string().len() + 2).max(4) as u16;
+
+    // Calculate which columns to show based on horizontal scroll
+    // Each column gets a fixed width for consistent display
+    let col_width: u16 = 20; // Fixed column width
+    let cols_that_fit = ((available_width as u16).saturating_sub(row_num_width) / col_width).max(1) as usize;
+
+    // Calculate column scroll offset to keep selected column visible
+    let col_scroll = if app.results_col_selected >= cols_that_fit {
+        app.results_col_selected.saturating_sub(cols_that_fit - 1)
+    } else {
+        0
+    };
+
+    // Get visible columns range
+    let visible_cols_start = col_scroll;
+    let visible_cols_end = (col_scroll + cols_that_fit).min(app.result.columns.len());
+
+    // Build column widths
+    let mut widths: Vec<Constraint> = vec![Constraint::Length(row_num_width)];
+    for _ in visible_cols_start..visible_cols_end {
+        widths.push(Constraint::Length(col_width));
+    }
+
+    // Create header row with row number column and type indicators
+    let mut header_cells: Vec<Cell> = vec![
+        Cell::from(" # ").style(AlrajhiTheme::table_header())
+    ];
+    header_cells.extend(
+        app.result
+            .columns
+            .iter()
+            .enumerate()
+            .skip(visible_cols_start)
+            .take(visible_cols_end - visible_cols_start)
+            .map(|(i, c)| {
+                // Get type indicator
+                let type_indicator = get_type_indicator(&c.type_name);
+                // Truncate column name to fit
+                let name: String = c.name.chars().take(col_width as usize - 4).collect();
+                let header_text = format!("{} {}", type_indicator, name);
+
+                let style = if active && i == app.results_col_selected {
+                    AlrajhiTheme::selected()
+                } else {
+                    AlrajhiTheme::table_header()
+                };
+                Cell::from(header_text).style(style)
+            })
+    );
+    let header = Row::new(header_cells).height(1);
+
+    // Create data rows with row numbers
+    let visible_height = area.height.saturating_sub(3) as usize;
+    let scroll_offset = if app.results_selected >= visible_height {
+        app.results_selected.saturating_sub(visible_height - 1)
+    } else {
+        0
+    };
+
+    let rows: Vec<Row> = app
+        .result
+        .rows
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .map(|(row_idx, row)| {
+            // Row number cell
+            let row_num_style = if active && row_idx == app.results_selected {
+                AlrajhiTheme::selected()
+            } else {
+                AlrajhiTheme::row_number()
+            };
+            let mut cells: Vec<Cell> = vec![
+                Cell::from(format!("{:>width$} ", row_idx + 1, width = row_num_width as usize - 1))
+                    .style(row_num_style)
+            ];
+
+            // Data cells - only visible columns
+            cells.extend(
+                row.iter()
+                    .enumerate()
+                    .skip(visible_cols_start)
+                    .take(visible_cols_end - visible_cols_start)
+                    .map(|(col_idx, cell)| {
+                        let (value, is_null) = format_cell_value(cell);
+                        // Truncate value to fit column
+                        let display_value: String = value.chars().take(col_width as usize - 2).collect();
+
+                        let style = if active && row_idx == app.results_selected && col_idx == app.results_col_selected {
+                            AlrajhiTheme::selected()
+                        } else if active && row_idx == app.results_selected {
+                            AlrajhiTheme::highlighted()
+                        } else if is_null {
+                            AlrajhiTheme::null_value()
+                        } else if row_idx % 2 == 1 {
+                            AlrajhiTheme::table_row_alt()
+                        } else {
+                            AlrajhiTheme::normal_text()
+                        };
+
+                        Cell::from(format!(" {} ", display_value)).style(style)
+                    })
+            );
+            Row::new(cells)
+        })
+        .collect();
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(title, AlrajhiTheme::title())),
+        )
+        .highlight_style(AlrajhiTheme::highlighted());
+
+    f.render_widget(table, area);
+
+    // Draw scrollbar if needed
+    if app.result.rows.len() > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"));
+
+        let mut scrollbar_state = ScrollbarState::new(app.result.rows.len())
+            .position(app.results_selected);
+
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(&Margin { vertical: 1, horizontal: 0 }),
+            &mut scrollbar_state,
+        );
+    }
+
+    // Draw position indicator at bottom right
+    if !app.result.rows.is_empty() {
+        let pos_text = format!(
+            " Row {}/{} Col {}/{} ",
+            app.results_selected + 1,
+            app.result.rows.len(),
+            app.results_col_selected + 1,
+            app.result.columns.len()
+        );
+        let pos_len = pos_text.len() as u16;
+        let pos_x = area.x + area.width.saturating_sub(pos_len + 2);
+        let pos_y = area.y + area.height.saturating_sub(1);
+
+        if pos_x > area.x && pos_y < area.y + area.height {
+            let pos_span = Span::styled(pos_text, AlrajhiTheme::dim_text());
+            f.render_widget(
+                Paragraph::new(pos_span),
+                Rect::new(pos_x, pos_y, pos_len, 1),
+            );
+        }
+    }
+}
+
+/// Draw the columns tab (column info)
+fn draw_results_columns(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    let title = format!(" Columns │ {} total ", app.result.columns.len());
+
+    // Create column info rows - use results_selected for vertical scrolling
+    let visible_height = area.height.saturating_sub(3) as usize;
+    let scroll_offset = if app.results_selected >= visible_height {
+        app.results_selected.saturating_sub(visible_height - 1)
+    } else {
+        0
+    };
+
+    let rows: Vec<Row> = app
+        .result
+        .columns
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .map(|(idx, col)| {
+            let type_indicator = get_type_indicator(&col.type_name);
+            let row_style = if active && idx == app.results_selected {
+                AlrajhiTheme::selected()
+            } else if idx % 2 == 1 {
+                AlrajhiTheme::table_row_alt()
+            } else {
+                AlrajhiTheme::normal_text()
+            };
+
+            Row::new(vec![
+                Cell::from(format!(" {:>3} ", idx + 1)).style(AlrajhiTheme::row_number()),
+                Cell::from(format!(" {} ", type_indicator)),
+                Cell::from(format!(" {} ", col.name)).style(row_style),
+                Cell::from(format!(" {} ", col.type_name)).style(AlrajhiTheme::dim_text()),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(6),   // #
+        Constraint::Length(4),   // Icon
+        Constraint::Min(20),     // Name
+        Constraint::Length(20),  // Type
+    ];
+
+    let header = Row::new(vec![
+        Cell::from(" # ").style(AlrajhiTheme::table_header()),
+        Cell::from(" ").style(AlrajhiTheme::table_header()),
+        Cell::from(" Column Name ").style(AlrajhiTheme::table_header()),
+        Cell::from(" Data Type ").style(AlrajhiTheme::table_header()),
+    ])
+    .height(1);
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(title, AlrajhiTheme::title())),
+        );
+
+    f.render_widget(table, area);
+
+    // Draw scrollbar if needed
+    if app.result.columns.len() > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"));
+
+        let mut scrollbar_state = ScrollbarState::new(app.result.columns.len())
+            .position(app.results_selected);
+
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(&Margin { vertical: 1, horizontal: 0 }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+/// Draw the stats tab (query statistics)
+fn draw_results_stats(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    let exec_time = app.result.execution_time;
+    let exec_ms = exec_time.as_secs_f64() * 1000.0;
+
+    // Count data types
+    let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for col in &app.result.columns {
+        *type_counts.entry(col.type_name.clone()).or_insert(0) += 1;
+    }
+
+    // Count NULL values
+    let mut null_count = 0;
+    let mut total_cells = 0;
+    for row in &app.result.rows {
+        for cell in row {
+            total_cells += 1;
+            if matches!(cell, CellValue::Null) {
+                null_count += 1;
+            }
+        }
+    }
+
+    let null_percentage = if total_cells > 0 {
+        (null_count as f64 / total_cells as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Build stats text
+    let mut stats_lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled("═══ QUERY STATISTICS ═══", AlrajhiTheme::info())),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Execution Time:  ", AlrajhiTheme::dim_text()),
+            Span::styled(format!("{:.2} ms", exec_ms), AlrajhiTheme::success()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Rows Returned:   ", AlrajhiTheme::dim_text()),
+            Span::styled(format_number(app.result.row_count as i64), AlrajhiTheme::info()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Columns:         ", AlrajhiTheme::dim_text()),
+            Span::styled(format!("{}", app.result.columns.len()), AlrajhiTheme::info()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Total Cells:     ", AlrajhiTheme::dim_text()),
+            Span::styled(format_number(total_cells as i64), AlrajhiTheme::normal_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("  NULL Values:     ", AlrajhiTheme::dim_text()),
+            Span::styled(format!("{} ({:.1}%)", format_number(null_count as i64), null_percentage), AlrajhiTheme::warning()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("═══ DATA TYPES ═══", AlrajhiTheme::info())),
+        Line::from(""),
+    ];
+
+    // Add type breakdown
+    let mut type_vec: Vec<(&String, &usize)> = type_counts.iter().collect();
+    type_vec.sort_by(|a, b| b.1.cmp(a.1));
+
+    for (type_name, count) in type_vec.iter().take(10) {
+        let indicator = get_type_indicator(type_name);
+        stats_lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", indicator), AlrajhiTheme::normal_text()),
+            Span::styled(format!("{:<20}", type_name), AlrajhiTheme::dim_text()),
+            Span::styled(format!("{:>5} column(s)", count), AlrajhiTheme::normal_text()),
+        ]));
+    }
+
+    stats_lines.push(Line::from(""));
+    stats_lines.push(Line::from(Span::styled("═══ SHORTCUTS ═══", AlrajhiTheme::info())));
+    stats_lines.push(Line::from(""));
+    stats_lines.push(Line::from(vec![
+        Span::styled("  Ctrl+E  ", AlrajhiTheme::info()),
+        Span::styled("Export to CSV", AlrajhiTheme::dim_text()),
+    ]));
+    stats_lines.push(Line::from(vec![
+        Span::styled("  Ctrl+S  ", AlrajhiTheme::info()),
+        Span::styled("Export to JSON", AlrajhiTheme::dim_text()),
+    ]));
+    stats_lines.push(Line::from(vec![
+        Span::styled("  Ctrl+I  ", AlrajhiTheme::info()),
+        Span::styled("Copy row as INSERT", AlrajhiTheme::dim_text()),
+    ]));
+    stats_lines.push(Line::from(vec![
+        Span::styled("  Ctrl+Y  ", AlrajhiTheme::info()),
+        Span::styled("Copy cell value", AlrajhiTheme::dim_text()),
+    ]));
+
+    let stats_widget = Paragraph::new(stats_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(" Stats ", AlrajhiTheme::title())),
+        );
+
+    f.render_widget(stats_widget, area);
+}
+
+/// Get type indicator emoji for column type
+fn get_type_indicator(type_name: &str) -> &'static str {
+    match type_name.to_uppercase().as_str() {
+        "INT" | "INTEGER" | "BIGINT" | "SMALLINT" | "TINYINT" => "🔢",
+        "DECIMAL" | "NUMERIC" | "FLOAT" | "REAL" | "MONEY" | "SMALLMONEY" => "💰",
+        "VARCHAR" | "NVARCHAR" | "CHAR" | "NCHAR" | "TEXT" | "NTEXT" | "VARCHAR(MAX)" => "📝",
+        "DATETIME" | "DATETIME2" | "DATE" | "TIME" | "DATETIMEOFFSET" | "SMALLDATETIME" => "📅",
+        "BIT" => "✓",
+        "BINARY" | "VARBINARY" | "VARBINARY(MAX)" | "IMAGE" => "📦",
+        "UNIQUEIDENTIFIER" => "🔑",
+        "XML" => "📄",
+        _ => "•",
+    }
+}
+
+/// Format cell value for display with NULL handling
+fn format_cell_value(cell: &CellValue) -> (String, bool) {
+    match cell {
+        CellValue::Null => ("NULL".to_string(), true),
+        CellValue::Bool(v) => (if *v { "✓ true" } else { "✗ false" }.to_string(), false),
+        CellValue::Int(v) => (format_number(*v), false),
+        CellValue::Float(v) => (format!("{:.4}", v), false),
+        CellValue::String(v) => {
+            // Truncate long strings
+            if v.len() > 50 {
+                (format!("{}…", &v[..47]), false)
+            } else {
+                (v.clone(), false)
+            }
+        }
+        CellValue::DateTime(v) => (v.clone(), false),
+        CellValue::Binary(v) => (format!("0x{}…", &hex_encode(&v[..v.len().min(8)])), false),
+    }
+}
+
+/// Format number with thousand separators
+fn format_number(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    if n < 0 {
+        result.push('-');
+    }
+    result.chars().rev().collect()
+}
+
+/// Hex encode bytes
+fn hex_encode(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{:02X}", b)).collect()
+}
+
+/// Draw the schema explorer panel
+pub fn draw_schema_explorer(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    let title = if active { " Schema [3] ▪ " } else { " Schema [3] " };
+
+    let visible_nodes = app.get_visible_schema_nodes();
+
+    let items: Vec<ListItem> = visible_nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, (depth, node))| {
+            let indent = "  ".repeat(*depth);
+            let icon = node.icon();
+            let expand_indicator = if !node.children.is_empty() {
+                if node.expanded { "▼ " } else { "▶ " }
+            } else {
+                "  "
+            };
+
+            let style = if active && idx == app.schema_selected {
+                AlrajhiTheme::selected()
+            } else {
+                match node.node_type {
+                    SchemaNodeType::Folder => AlrajhiTheme::info(),
+                    SchemaNodeType::Table => AlrajhiTheme::normal_text(),
+                    SchemaNodeType::View => AlrajhiTheme::dim_text(),
+                    SchemaNodeType::Procedure => AlrajhiTheme::warning(),
+                    SchemaNodeType::Function => AlrajhiTheme::warning(),
+                    _ => AlrajhiTheme::normal_text(),
+                }
+            };
+
+            ListItem::new(format!("{}{}{} {}", indent, expand_indicator, icon, node.name))
+                .style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(title, AlrajhiTheme::title())),
+        )
+        .highlight_style(AlrajhiTheme::selected());
+
+    f.render_widget(list, area);
+}
+
+/// Draw the history panel
+pub fn draw_history_panel(f: &mut Frame, app: &App, area: Rect, active: bool) {
+    let border_style = if active {
+        AlrajhiTheme::active_border()
+    } else {
+        AlrajhiTheme::inactive_border()
+    };
+
+    let title = if active { " History [4] ▪ " } else { " History [4] " };
+
+    let entries = app.history.entries();
+    let items: Vec<ListItem> = entries
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(idx, entry)| {
+            let time = entry.timestamp.format("%H:%M:%S").to_string();
+            let query_preview: String = entry
+                .query
+                .chars()
+                .take(50)
+                .filter(|c| !c.is_control())
+                .collect();
+            let query_preview = if entry.query.len() > 50 {
+                format!("{}...", query_preview)
+            } else {
+                query_preview
+            };
+
+            let row_info = entry.row_count.map(|r| format!(" ({} rows)", r)).unwrap_or_default();
+
+            let style = if active && idx == app.history_selected {
+                AlrajhiTheme::selected()
+            } else {
+                AlrajhiTheme::normal_text()
+            };
+
+            ListItem::new(format!("{} │ {}{}", time, query_preview, row_info)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(
+                    format!("{} ({}) ", title, app.history.len()),
+                    AlrajhiTheme::title(),
+                )),
+        );
+
+    f.render_widget(list, area);
+}
+
+/// SQL syntax highlighting
+fn highlight_sql(sql: &str) -> Vec<Line<'static>> {
+    let keywords = [
+        "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN",
+        "ORDER", "BY", "ASC", "DESC", "GROUP", "HAVING", "JOIN", "INNER", "LEFT",
+        "RIGHT", "OUTER", "FULL", "CROSS", "ON", "AS", "DISTINCT", "TOP", "WITH",
+        "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE",
+        "ALTER", "DROP", "INDEX", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER",
+        "BEGIN", "END", "IF", "ELSE", "WHILE", "RETURN", "DECLARE", "EXEC", "EXECUTE",
+        "NULL", "IS", "CASE", "WHEN", "THEN", "UNION", "ALL", "EXISTS", "COUNT",
+        "SUM", "AVG", "MIN", "MAX", "CAST", "CONVERT", "COALESCE", "ISNULL",
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for line in sql.lines() {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut current_word = String::new();
+        let mut in_string = false;
+        let mut string_char = ' ';
+        let mut in_comment = false;
+
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            let c = chars[i];
+
+            // Check for line comment
+            if !in_string && i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] == '-' {
+                if !current_word.is_empty() {
+                    spans.push(colorize_word(&current_word, &keywords));
+                    current_word.clear();
+                }
+                // Rest of line is comment
+                let comment: String = chars[i..].iter().collect();
+                spans.push(Span::styled(comment, Style::default().fg(AlrajhiTheme::COMMENT)));
+                break;
+            }
+
+            // Handle strings
+            if (c == '\'' || c == '"') && !in_comment {
+                if in_string && c == string_char {
+                    current_word.push(c);
+                    spans.push(Span::styled(
+                        current_word.clone(),
+                        Style::default().fg(AlrajhiTheme::STRING),
+                    ));
+                    current_word.clear();
+                    in_string = false;
+                } else if !in_string {
+                    if !current_word.is_empty() {
+                        spans.push(colorize_word(&current_word, &keywords));
+                        current_word.clear();
+                    }
+                    in_string = true;
+                    string_char = c;
+                    current_word.push(c);
+                } else {
+                    current_word.push(c);
+                }
+            } else if in_string {
+                current_word.push(c);
+            } else if c.is_whitespace() || "(),;.=<>+-*/".contains(c) {
+                if !current_word.is_empty() {
+                    spans.push(colorize_word(&current_word, &keywords));
+                    current_word.clear();
+                }
+                spans.push(Span::styled(
+                    c.to_string(),
+                    Style::default().fg(AlrajhiTheme::OPERATOR),
+                ));
+            } else {
+                current_word.push(c);
+            }
+
+            i += 1;
+        }
+
+        if !current_word.is_empty() {
+            spans.push(colorize_word(&current_word, &keywords));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn colorize_word(word: &str, keywords: &[&str]) -> Span<'static> {
+    let upper = word.to_uppercase();
+
+    if keywords.contains(&upper.as_str()) {
+        Span::styled(
+            word.to_string(),
+            Style::default()
+                .fg(AlrajhiTheme::KEYWORD)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if word.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        Span::styled(
+            word.to_string(),
+            Style::default().fg(AlrajhiTheme::NUMBER),
+        )
+    } else if word.starts_with('@') || word.starts_with("@@") {
+        Span::styled(
+            word.to_string(),
+            Style::default().fg(AlrajhiTheme::FUNCTION),
+        )
+    } else {
+        Span::styled(word.to_string(), AlrajhiTheme::normal_text())
+    }
+}
+
+/// Calculate cursor position with scroll offset
+fn calculate_cursor_position_with_scroll(app: &App, code_area: Rect) -> (u16, u16) {
+    let (line, col) = app.get_cursor_line_col();
+
+    // Adjust for scroll offset
+    let visible_line = line.saturating_sub(app.query_scroll_y);
+    let visible_col = col.saturating_sub(app.query_scroll_x);
+
+    let x = (code_area.x + visible_col as u16).min(code_area.x + code_area.width.saturating_sub(1));
+    let y = (code_area.y + visible_line as u16).min(code_area.y + code_area.height.saturating_sub(1));
+
+    (x, y)
+}
+
+/// SQL syntax highlighting with scroll support
+fn highlight_sql_with_scroll(
+    sql: &str,
+    scroll_x: usize,
+    scroll_y: usize,
+    visible_width: usize,
+    visible_height: usize,
+) -> Vec<Line<'static>> {
+    let keywords = [
+        "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN",
+        "ORDER", "BY", "ASC", "DESC", "GROUP", "HAVING", "JOIN", "INNER", "LEFT",
+        "RIGHT", "OUTER", "FULL", "CROSS", "ON", "AS", "DISTINCT", "TOP", "WITH",
+        "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE",
+        "ALTER", "DROP", "INDEX", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER",
+        "BEGIN", "END", "IF", "ELSE", "WHILE", "RETURN", "DECLARE", "EXEC", "EXECUTE",
+        "NULL", "IS", "CASE", "WHEN", "THEN", "UNION", "ALL", "EXISTS", "COUNT",
+        "SUM", "AVG", "MIN", "MAX", "CAST", "CONVERT", "COALESCE", "ISNULL",
+    ];
+
+    let source_lines: Vec<&str> = sql.split('\n').collect();
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (line_idx, line_content) in source_lines.iter().enumerate().skip(scroll_y).take(visible_height) {
+        // Apply horizontal scroll
+        let display_content: String = line_content
+            .chars()
+            .skip(scroll_x)
+            .take(visible_width)
+            .collect();
+
+        let mut spans: Vec<Span> = Vec::new();
+        let mut current_word = String::new();
+        let mut in_string = false;
+        let mut string_char = ' ';
+
+        let chars: Vec<char> = display_content.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            let c = chars[i];
+
+            // Check for line comment
+            if !in_string && i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] == '-' {
+                if !current_word.is_empty() {
+                    spans.push(colorize_word(&current_word, &keywords));
+                    current_word.clear();
+                }
+                let comment: String = chars[i..].iter().collect();
+                spans.push(Span::styled(comment, Style::default().fg(AlrajhiTheme::COMMENT)));
+                break;
+            }
+
+            // Handle strings
+            if (c == '\'' || c == '"') && !in_string {
+                if !current_word.is_empty() {
+                    spans.push(colorize_word(&current_word, &keywords));
+                    current_word.clear();
+                }
+                in_string = true;
+                string_char = c;
+                current_word.push(c);
+            } else if in_string && c == string_char {
+                current_word.push(c);
+                spans.push(Span::styled(
+                    current_word.clone(),
+                    Style::default().fg(AlrajhiTheme::STRING),
+                ));
+                current_word.clear();
+                in_string = false;
+            } else if in_string {
+                current_word.push(c);
+            } else if c.is_whitespace() || "(),;.=<>+-*/[]".contains(c) {
+                if !current_word.is_empty() {
+                    spans.push(colorize_word(&current_word, &keywords));
+                    current_word.clear();
+                }
+                spans.push(Span::styled(
+                    c.to_string(),
+                    Style::default().fg(AlrajhiTheme::OPERATOR),
+                ));
+            } else {
+                current_word.push(c);
+            }
+
+            i += 1;
+        }
+
+        if !current_word.is_empty() {
+            if in_string {
+                spans.push(Span::styled(current_word, Style::default().fg(AlrajhiTheme::STRING)));
+            } else {
+                spans.push(colorize_word(&current_word, &keywords));
+            }
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    // Pad with empty lines if needed
+    while lines.len() < visible_height {
+        lines.push(Line::from(""));
+    }
+
+    lines
+}
