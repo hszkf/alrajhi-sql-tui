@@ -111,6 +111,74 @@ do_config() {
     run_app
 }
 
+do_test() {
+    print_banner
+    echo -e "${BLUE}Testing connection...${NC}"
+    echo ""
+
+    # Load config
+    if [ -f "$INSTALL_DIR/.env" ]; then
+        set -a
+        source "$INSTALL_DIR/.env"
+        set +a
+    else
+        echo -e "${RED}❌ No .env file found. Run: atui config${NC}"
+        exit 1
+    fi
+
+    HOST="${DB_HOST:-10.200.224.42}"
+    PORT="${DB_PORT:-1433}"
+
+    echo -e "  Host: ${YELLOW}$HOST${NC}"
+    echo -e "  Port: ${YELLOW}$PORT${NC}"
+    echo ""
+
+    # Test 1: Ping
+    echo -n "  [1/3] Ping host... "
+    if ping -c 1 -W 3 "$HOST" &> /dev/null; then
+        echo -e "${GREEN}✓ OK${NC}"
+    else
+        echo -e "${RED}✗ FAILED${NC}"
+        echo -e "${RED}      Host not reachable. Check network/VPN.${NC}"
+        exit 1
+    fi
+
+    # Test 2: Port
+    echo -n "  [2/3] Port $PORT... "
+    if nc -zw3 "$HOST" "$PORT" &> /dev/null; then
+        echo -e "${GREEN}✓ OK${NC}"
+    else
+        echo -e "${RED}✗ FAILED${NC}"
+        echo -e "${RED}      Port blocked. Your IP may need to be whitelisted.${NC}"
+        echo ""
+        echo -e "      Your IP: ${YELLOW}$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')${NC}"
+        echo -e "      Ask DBA to allow your IP on SQL Server firewall."
+        exit 1
+    fi
+
+    # Test 3: SQL Connection
+    echo -n "  [3/3] SQL login... "
+    cd "$INSTALL_DIR"
+    if [ -f "target/release/test_date_query" ]; then
+        set -a
+        source .env
+        set +a
+        if ./target/release/test_date_query 2>&1 | grep -q "Connected successfully"; then
+            echo -e "${GREEN}✓ OK${NC}"
+            echo ""
+            echo -e "${GREEN}✓ All tests passed! Connection is working.${NC}"
+        else
+            echo -e "${RED}✗ FAILED${NC}"
+            echo -e "${RED}      Check username/password in .env${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${YELLOW}? SKIP (test binary not found)${NC}"
+        echo ""
+        echo -e "${GREEN}✓ Network tests passed!${NC}"
+    fi
+}
+
 show_help() {
     print_banner
     echo "Usage: atui [command]"
@@ -119,6 +187,7 @@ show_help() {
     echo "  (none)     Run SQL Studio (install if needed)"
     echo "  update     Update to latest version"
     echo "  config     Reconfigure database connection"
+    echo "  test       Test database connection"
     echo "  help       Show this help"
     echo ""
 }
@@ -130,6 +199,9 @@ case "${1:-}" in
         ;;
     config)
         do_config
+        ;;
+    test)
+        do_test
         ;;
     help|--help|-h)
         show_help
