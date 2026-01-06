@@ -32,6 +32,7 @@ This will:
 
 ```bash
 atui              # Run from anywhere
+atui test         # Test database connection
 atui update       # Update to latest version
 atui config       # Change database credentials
 ```
@@ -165,6 +166,27 @@ src/
 
 ## Troubleshooting
 
+### Connection Issues
+
+Run the connection test:
+```bash
+atui test
+```
+
+Output shows:
+```
+  [1/3] Ping host... ✓ OK       # Host reachable
+  [2/3] Port 1433... ✗ FAILED   # Port blocked - need IP whitelisted
+  [3/3] SQL login... ✓ OK       # Credentials valid
+```
+
+**If Port test fails:**
+- Your IP needs to be whitelisted on SQL Server firewall
+- Ask DBA to allow your IP on port 1433
+
+**If SQL login fails:**
+- Check credentials: `atui config`
+
 ### Build Errors
 ```bash
 # Update Rust toolchain
@@ -174,11 +196,6 @@ rustup update
 cargo clean
 cargo build --release
 ```
-
-### Connection Issues
-- Verify SQL Server is accessible on port 1433
-- Check firewall settings
-- Run `atui config` to update credentials
 
 ---
 Built with Rust for Alrajhi Bank IT Team
