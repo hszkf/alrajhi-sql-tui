@@ -3,7 +3,13 @@
 # Install: curl -fsSL https://raw.githubusercontent.com/hszkf/alrajhi-sql-tui/master/atui | sudo tee /usr/local/bin/atui > /dev/null && sudo chmod +x /usr/local/bin/atui
 
 set -e
-INSTALL_DIR="$HOME/alrajhi-sql-tui"
+# Use script's directory if available, otherwise default to ~/alrajhi-sql-tui
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    INSTALL_DIR="$SCRIPT_DIR"
+else
+    INSTALL_DIR="$HOME/alrajhi-sql-tui"
+fi
 REPO="https://github.com/hszkf/alrajhi-sql-tui.git"
 
 # Colors
@@ -77,7 +83,9 @@ EOF
 
 run_app() {
     cd "$INSTALL_DIR"
+    set -a
     source .env 2>/dev/null || true
+    set +a
     exec ./target/release/alrajhi_sql_tui
 }
 
