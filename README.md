@@ -94,15 +94,36 @@ cargo build --release
 
 ## Configuration
 
-Edit `src/db/connection.rs` to change database settings:
+Set environment variables before running:
 
-```rust
-host: "10.200.224.42"
-port: 1433
-database: "Staging"
-username: "ssis_admin"
-password: "your_password"
+```bash
+# Option 1: Export in terminal
+export DB_HOST="10.200.224.42"
+export DB_PORT="1433"
+export DB_USER="your_username"
+export DB_PASSWORD="your_password"
+export DB_DATABASE="Staging"
+
+# Option 2: Create .env file (not tracked by git)
+cat > .env << EOF
+DB_HOST=10.200.224.42
+DB_PORT=1433
+DB_USER=your_username
+DB_PASSWORD=your_password
+DB_DATABASE=Staging
+EOF
+
+# Load .env and run
+source .env && ./target/release/alrajhi_sql_tui
 ```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | localhost | SQL Server hostname or IP |
+| `DB_PORT` | 1433 | SQL Server port |
+| `DB_USER` | sa | Database username |
+| `DB_PASSWORD` | (empty) | Database password |
+| `DB_DATABASE` | master | Default database |
 
 ## Project Structure
 

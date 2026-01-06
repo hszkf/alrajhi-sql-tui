@@ -22,11 +22,11 @@ pub struct DbConfig {
 impl Default for DbConfig {
     fn default() -> Self {
         Self {
-            host: "10.200.224.42".to_string(),
-            port: 1433,
-            user: "ssis_admin".to_string(),
-            password: "P@55word".to_string(),
-            database: "Staging".to_string(),
+            host: std::env::var("DB_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            port: std::env::var("DB_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1433),
+            user: std::env::var("DB_USER").unwrap_or_else(|_| "sa".to_string()),
+            password: std::env::var("DB_PASSWORD").unwrap_or_else(|_| "".to_string()),
+            database: std::env::var("DB_DATABASE").unwrap_or_else(|_| "master".to_string()),
             encrypt: false,
             trust_cert: true,
         }
